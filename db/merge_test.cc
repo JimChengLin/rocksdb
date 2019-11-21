@@ -4,8 +4,8 @@
 //  (found in the LICENSE.Apache file in the root directory).
 //
 #include <assert.h>
-#include <memory>
 #include <iostream>
+#include <memory>
 
 #include "db/db_impl/db_impl.h"
 #include "db/dbformat.h"
@@ -47,12 +47,8 @@ class CountMergeOperator : public AssociativeMergeOperator {
       return true;
     }
 
-    return mergeOperator_->PartialMerge(
-        key,
-        *existing_value,
-        value,
-        new_value,
-        logger);
+    return mergeOperator_->PartialMerge(key, *existing_value, value, new_value,
+                                        logger);
   }
 
   bool PartialMergeMulti(const Slice& key,
@@ -97,6 +93,7 @@ std::shared_ptr<DB> OpenDb(const std::string& dbname, const bool ttl = false,
     std::cerr << s.ToString() << std::endl;
     assert(false);
   }
+  db->GetEnv()->SetBackgroundThreads(2, Env::HIGH);
   return std::shared_ptr<DB>(db);
 }
 
@@ -106,7 +103,6 @@ std::shared_ptr<DB> OpenDb(const std::string& dbname, const bool ttl = false,
 // set, add, get and remove
 // This is a quick implementation without a Merge operation.
 class Counters {
-
  protected:
   std::shared_ptr<DB> db_;
 
@@ -190,7 +186,6 @@ class Counters {
     return get(key, &base) && set(key, base + value);
   }
 
-
   // convenience functions for testing
   void assert_set(const std::string& key, uint64_t value) {
     assert(set(key, value));
@@ -202,27 +197,25 @@ class Counters {
     uint64_t value = default_;
     int result = get(key, &value);
     assert(result);
-    if (result == 0) exit(1); // Disable unused variable warning.
+    if (result == 0) exit(1);  // Disable unused variable warning.
     return value;
   }
 
   void assert_add(const std::string& key, uint64_t value) {
     int result = add(key, value);
     assert(result);
-    if (result == 0) exit(1); // Disable unused variable warning.
+    if (result == 0) exit(1);  // Disable unused variable warning.
   }
 };
 
 // Implement 'add' directly with the new Merge operation
 class MergeBasedCounters : public Counters {
  private:
-  WriteOptions merge_option_; // for merge
+  WriteOptions merge_option_;  // for merge
 
  public:
   explicit MergeBasedCounters(std::shared_ptr<DB> db, uint64_t defaultCount = 0)
-      : Counters(db, defaultCount),
-        merge_option_() {
-  }
+      : Counters(db, defaultCount), merge_option_() {}
 
   // mapped to a rocksdb Merge operation
   bool add(const std::string& key, uint64_t value) override {
@@ -243,14 +236,13 @@ class MergeBasedCounters : public Counters {
 void dumpDb(DB* db) {
   auto it = std::unique_ptr<Iterator>(db->NewIterator(ReadOptions()));
   for (it->SeekToFirst(); it->Valid(); it->Next()) {
-    //uint64_t value = DecodeFixed64(it->value().data());
-    //std::cout << it->key().ToString() << ": " << value << std::endl;
+    // uint64_t value = DecodeFixed64(it->value().data());
+    // std::cout << it->key().ToString() << ": " << value << std::endl;
   }
   assert(it->status().ok());  // Check for any errors found during the scan
 }
 
 void testCounters(Counters& counters, DB* db, bool test_compaction) {
-
   FlushOptions o;
   o.wait = true;
 
@@ -270,7 +262,7 @@ void testCounters(Counters& counters, DB* db, bool test_compaction) {
   if (test_compaction) db->Flush(o);
 
   // 1+2 = 3
-  assert(counters.assert_get("a")== 3);
+  assert(counters.assert_get("a") == 3);
 
   dumpDb(db);
 
@@ -291,14 +283,89 @@ void testCounters(Counters& counters, DB* db, bool test_compaction) {
 
     dumpDb(db);
 
-    assert(counters.assert_get("a")== 3);
+    assert(counters.assert_get("a") == 3);
     assert(counters.assert_get("b") == sum);
   }
 }
 
+void testCountersWithFlushAndCompaction(Counters& counters, DB* db) {
+  FlushOptions o;
+  o.wait = true;
+
+  // add some data, therefore we can trigger compaction
+  db->Put({}, "1", "1");
+  db->Flush(o);
+  db->Put({}, "2", "2");
+  db->Flush(o);
+  db->Put({}, "5", "5");
+  db->Flush(o);
+  db->Put({}, "6", "6");
+  db->Flush(o);
+  sleep(2);
+
+  std::shared_ptr<std::atomic<bool>> verified(new std::atomic<bool>(false));
+  std::atomic<int> cnt{0};
+  auto get_thread_id = [&cnt]() {
+    thread_local int thread_id{cnt++};
+    return thread_id;
+  };
+
+  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+      "VersionSet::LogAndApply::WriterIsWaiting", [&, verified](void* arg) {
+        InstrumentedMutex* mtx = reinterpret_cast<InstrumentedMutex*>(arg);
+        auto thread_id = get_thread_id();
+        // condition variable is fine to be false-postive
+        // it is always legal to wake up and do nothing
+        while (!*verified) {
+          mtx->AssertHeld();
+          mtx->Unlock();
+          std::cout << "thread - " + std::to_string(thread_id) +
+                           " is waiting\n";
+          sleep(1);
+          mtx->Lock();
+          if (thread_id == 0 && cnt == 2) {
+            break;
+          }
+        }
+      });
+  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+      "VersionSet::LogAndApply::WriterIsLeader", [&](void*) {
+        if (cnt != 2) {
+          return;
+        }
+        auto thread_id = get_thread_id();
+        std::cout << "thread - " << thread_id << " is leader" << std::endl;
+      });
+  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+
+  Slice begin("0");
+  Slice end("3");
+  db->SuggestCompactRange(db->DefaultColumnFamily(), &begin, &end);
+
+  // ensure the compaction job gets executed eariler than the incoming flush job
+  // sleeping 2 seconds just works
+  sleep(2);
+
+  counters.add("test-key", 1);
+  counters.add("test-key", 1);
+  counters.add("test-key", 1);
+
+  o.wait = false;
+  db->Flush(o);
+
+  std::string val;
+  for (size_t i = 0; i < 10; i++) {
+    db->Get({}, "test-key", &val);
+    std::cout << "test-key val " << int(val[0]) << std::endl;
+    sleep(1);
+  }
+
+  verified->store(true);
+  rocksdb::SyncPoint::GetInstance()->ClearAllCallBacks();
+}
+
 void testSuccessiveMerge(Counters& counters, size_t max_num_merges,
                          size_t num_merges) {
-
   counters.assert_remove("z");
   uint64_t sum = 0;
 
@@ -398,9 +465,13 @@ void testSingleBatchSuccessiveMerge(DB* db, size_t max_num_merges,
 }
 
 void runTest(const std::string& dbname, const bool use_ttl = false) {
-
   {
     auto db = OpenDb(dbname, use_ttl);
+
+    {
+      MergeBasedCounters counters(db, 0);
+      testCountersWithFlushAndCompaction(counters, db.get());
+    }
 
     {
       Counters counters(db, 0);

@@ -9,6 +9,7 @@
 #include "db/db_impl/db_impl.h"
 
 #include <cinttypes>
+#include <iostream>
 
 #include "db/builder.h"
 #include "db/error_handler.h"
@@ -2159,6 +2160,7 @@ Status DBImpl::BackgroundFlush(bool* made_progress, JobContext* job_context,
   std::vector<SuperVersionContext>& superversion_contexts =
       job_context->superversion_contexts;
   autovector<ColumnFamilyData*> column_families_not_to_flush;
+  std::cout << "flush_queue size " << flush_queue_.size() << std::endl;
   while (!flush_queue_.empty()) {
     // This cfd is already referenced
     const FlushRequest& flush_req = PopFirstFromFlushQueue();

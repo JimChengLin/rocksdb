@@ -4032,6 +4032,7 @@ Status VersionSet::LogAndApply(
   }
   assert(!writers.empty());
   ManifestWriter& first_writer = writers.front();
+  TEST_SYNC_POINT_CALLBACK("VersionSet::LogAndApply::WriterIsWaiting", mu);
   while (!first_writer.done && &first_writer != manifest_writers_.front()) {
     first_writer.cv.Wait();
   }
@@ -4046,6 +4047,7 @@ Status VersionSet::LogAndApply(
 #endif /* !NDEBUG */
     return first_writer.status;
   }
+  TEST_SYNC_POINT("VersionSet::LogAndApply::WriterIsLeader");
 
   int num_undropped_cfds = 0;
   for (auto cfd : column_family_datas) {

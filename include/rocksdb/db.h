@@ -962,7 +962,7 @@ class DB {
     return CompactRange(options, DefaultColumnFamily(), begin, end);
   }
 
-  ROCKSDB_DEPRECATED_FUNC virtual Status CompactRange(
+  virtual Status CompactRange(
       ColumnFamilyHandle* column_family, const Slice* begin, const Slice* end,
       bool change_level = false, int target_level = -1,
       uint32_t target_path_id = 0) {
