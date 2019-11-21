@@ -323,6 +323,9 @@ void testCountersWithFlushAndCompaction(Counters& counters, DB* db) {
                            " is waiting\n";
           sleep(1);
           mtx->Lock();
+
+          // I am 100% sure the leader is thread - 0 and there are 2 working
+          // background threads
           if (thread_id == 0 && cnt == 2) {
             break;
           }
